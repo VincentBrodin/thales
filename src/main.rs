@@ -1,75 +1,112 @@
-use std::{
-    collections::HashMap,
-    env,
-    io::{BufRead, BufReader},
-    os::unix::net::UnixStream,
+use std::{io, sync::Arc};
+
+use hyprland::{
+    data::Monitors,
+    event_listener::AsyncEventListener,
+    keyword::{Keyword, OptionValue},
+    shared::HyprData,
 };
+use thiserror::Error;
 
-mod monitor;
-mod utils;
+use crate::config::Config;
 
-fn main() {
-    let config_file = utils::open_or_create_config()
-        .unwrap_or_else(|err| panic!("Could create or open the config file: {}", err));
-    let configs: HashMap<String, monitor::Config> = serde_json::from_reader(config_file)
-        .unwrap_or_else(|err| panic!("Config file is not valid: {}", err));
+mod config;
 
-    set_state(&configs);
+const APP_NAME: &str = "fluxo";
+const CONFIG_FILE: &str = "config.toml";
 
-    let runtime_dir = env::var("XDG_RUNTIME_DIR")
-        .unwrap_or_else(|err| panic!("XDG_RUNTIME_DIR is not set: {}", err));
-    let instance = env::var("HYPRLAND_INSTANCE_SIGNATURE")
-        .unwrap_or_else(|err| panic!("HYPRLAND_INSTANCE_SIGNATURE is not set: {}", err));
-
-    let socket_path = format!("{}/hypr/{}/.socket2.sock", runtime_dir, instance);
-    let stream = UnixStream::connect(socket_path)
-        .unwrap_or_else(|err| panic!("Could not connect to stream: {}", err));
-
-    let reader = BufReader::new(stream);
-
-    // This reads all inputs from hyprland
-    for line in reader.lines() {
-        let line = match line {
-            Ok(v) => v,
-            Err(err) => {
-                eprintln!("Error reading stream: {}", err);
-                continue;
-            }
-        };
-        let cmds = match monitor::parse_event(&line) {
-            monitor::Event::MonitorAdded(name) => match configs.get(&name) {
-                Some(config) => &config.on_added,
-                None => {
-                    println!("No config for: {}", name);
-                    continue;
-                }
-            },
-            monitor::Event::MonitorRemoved(name) => match configs.get(&name) {
-                Some(config) => &config.on_removed,
-                None => {
-                    println!("No config for: {}", name);
-                    continue;
-                }
-            },
-            monitor::Event::ConfigReload => {
-                set_state(&configs);
-                continue;
-            }
-            monitor::Event::Unkown => continue,
-        };
-
-        utils::run_cmds(cmds);
-    }
+#[derive(Error, Debug)]
+enum Error {
+    #[error("Io error: {0}")]
+    IoError(#[from] io::Error),
+    #[error("Serde error: {0}")]
+    TomlDeError(#[from] toml::de::Error),
+    #[error("Hyprland error: {0}")]
+    HyprlandError(#[from] hyprland::error::HyprError),
+    #[error("Failed to find config directory")]
+    ConfigDirectoryError,
 }
 
-fn set_state(configs: &HashMap<String, monitor::Config>) {
-    let monitors = monitor::get_monitors()
-        .unwrap_or_else(|err| panic!("Could not get active monitors: {}", err));
-    for (monitor, config) in configs.iter() {
-        let cmds = match monitors.iter().any(|m| &m.name == monitor) {
-            true => &config.on_added,
-            false => &config.on_removed,
-        };
-        utils::run_cmds(cmds);
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> Result<(), self::Error> {
+    let config = Arc::new(Config::load_from_file()?);
+    let mut event_listener = AsyncEventListener::new();
+
+    set_state_async(config.clone()).await?;
+
+    let added_config = config.clone();
+    event_listener.add_monitor_added_handler(move |event| {
+        let config = added_config.clone();
+        Box::pin(async move {
+            config
+                .monitors
+                .iter()
+                .filter(|monitor| monitor.name == event.name)
+                .filter_map(|monitor| monitor.on_added.as_ref())
+                .flatten()
+                .for_each(|command| {
+                    run_command(command.to_string());
+                });
+        })
+    });
+
+    let removed_config = config.clone();
+    event_listener.add_monitor_removed_handler(move |event| {
+        let config = removed_config.clone();
+        Box::pin(async move {
+            config
+                .monitors
+                .iter()
+                .filter(|monitor| monitor.name == event)
+                .filter_map(|monitor| monitor.on_removed.as_ref())
+                .flatten()
+                .for_each(|command| {
+                    run_command(command.to_string());
+                });
+            {}
+        })
+    });
+
+    let reload_config = config.clone();
+    event_listener.add_config_reloaded_handler(move || {
+        let config = reload_config.clone();
+        Box::pin(async move {
+            let _ = set_state_async(config).await;
+        })
+    });
+
+    event_listener.start_listener_async().await?;
+    Ok(())
+}
+
+fn run_command(command: String) {
+    println!("Running: {}", command);
+    Keyword::set("monitor", OptionValue::String(command))
+        .inspect_err(|err| println!("Error on removed: {}", err))
+        .ok();
+}
+
+async fn set_state_async(config: Arc<Config>) -> hyprland::Result<()> {
+    let monitors = Monitors::get_async().await?;
+    for config in config.monitors.iter() {
+        for monitor in monitors.iter() {
+            if monitor.name != config.name {
+                continue;
+            }
+            if monitor.disabled {
+                config.on_removed.as_ref().inspect(|commands| {
+                    commands
+                        .iter()
+                        .for_each(|command| run_command(command.to_string()));
+                });
+            } else {
+                config.on_added.as_ref().inspect(|commands| {
+                    commands
+                        .iter()
+                        .for_each(|command| run_command(command.to_string()))
+                });
+            }
+        }
     }
+    Ok(())
 }
