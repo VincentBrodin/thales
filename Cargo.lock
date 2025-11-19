@@ -106,20 +106,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "fluxo"
-version = "0.1.0"
-dependencies = [
- "dirs",
- "fern",
- "hyprland",
- "log",
- "serde",
- "thiserror",
- "tokio",
- "toml",
-]
-
-[[package]]
 name = "futures-core"
 version = "0.3.31"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -432,6 +418,20 @@ dependencies = [
  "proc-macro2",
  "quote",
  "unicode-ident",
+]
+
+[[package]]
+name = "thales"
+version = "0.1.0"
+dependencies = [
+ "dirs",
+ "fern",
+ "hyprland",
+ "log",
+ "serde",
+ "thiserror",
+ "tokio",
+ "toml",
 ]
 
 [[package]]

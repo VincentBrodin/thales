@@ -12,7 +12,7 @@ use crate::config::Config;
 
 mod config;
 
-const APP_NAME: &str = "fluxo";
+const APP_NAME: &str = "thales";
 const CONFIG_FILE: &str = "config.toml";
 
 #[derive(Error, Debug)]
